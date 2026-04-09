@@ -1,7 +1,7 @@
 {
   "name": "instagram-ai-backend",
-  "version": "2.0.0",
-  "description": "Backend for Instagram AI Content Studio + AI Image Editor",
+  "version": "3.0.0",
+  "description": "Backend for Instagram AI Content Studio + AI Image Editor — powered by Hugging Face",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
