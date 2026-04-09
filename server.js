@@ -21,7 +21,7 @@ app.get('/', (req, res) => res.json({
     claude:   !!process.env.ANTHROPIC_API_KEY,
     removebg: !!process.env.REMOVEBG_API_KEY,
     hf_token: !!process.env.HF_TOKEN,
-    image_gen: process.env.HF_TOKEN ? 'hf FLUX + pollinations fallback' : 'pollinations.ai (free)'
+    image_gen: process.env.HF_TOKEN ? 'fal-ai FLUX via HF router + pollinations fallback' : 'pollinations.ai (free)'
   }
 }));
 
@@ -64,21 +64,21 @@ app.post('/remove-bg', async (req, res) => {
     });
     if (!r.ok) { const e = await r.text(); console.error('Remove.bg:', e); return res.json({ image, removed: false, reason: e }); }
     res.json({ image: (await r.buffer()).toString('base64'), removed: true });
-  } catch (err) { console.error('BG error:', err); res.json({ image: req.body.image, removed: false, reason: err.message }); }
+  } catch (err) { res.json({ image: req.body.image, removed: false, reason: err.message }); }
 });
 
 /* ══════════════════════════════════════════
-   IMAGE GENERATION
-   Tier 1 — HF FLUX.1-schnell (correct router URL)
-   Tier 2 — Pollinations.ai  (free, with retry)
+   IMAGE GENERATION — single image
+   Tier 1: fal-ai/flux/schnell via HF router
+   Tier 2: Pollinations.ai (free fallback)
 ══════════════════════════════════════════ */
 app.post('/edit-image', async (req, res) => {
   try {
     const { image, theme, objects, mood, style, index = 0 } = req.body;
     const objText = objects ? ', ' + objects + ' nearby' : '';
 
-    /* Use Claude to describe the product so FLUX recreates it accurately */
-    let productDesc = 'a probiotic fizzy beverage bottle with colorful label and branding';
+    /* Use Claude to describe product so FLUX can recreate it */
+    let productDesc = 'a probiotic fizzy beverage bottle with colorful label';
     if (image && process.env.ANTHROPIC_API_KEY) {
       try {
         const dr = await fetch('https://api.anthropic.com/v1/messages', {
@@ -86,136 +86,160 @@ app.post('/edit-image', async (req, res) => {
           headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
           body: JSON.stringify({
             model: 'claude-haiku-4-5-20251001',
-            max_tokens: 120,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } },
-                { type: 'text', text: 'Describe this beverage product in one sentence for a photography prompt. Include: bottle/can shape, label colors, branding details. Be specific and visual. No intro, just the description.' }
-              ]
-            }]
+            max_tokens: 100,
+            messages: [{ role: 'user', content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } },
+              { type: 'text', text: 'Describe this beverage product in one sentence for a photography prompt. Include bottle/can shape, label colors, branding. Be specific. No intro text.' }
+            ]}]
           })
         });
         if (dr.ok) {
           const dd = await dr.json();
           const desc = dd.content[0]?.text?.trim();
-          if (desc) { productDesc = desc; console.log('[' + (index+1) + '] Product: ' + productDesc.slice(0, 80)); }
+          if (desc) productDesc = desc;
         }
-      } catch (e) { console.log('[' + (index+1) + '] Product description failed, using generic'); }
+      } catch (e) { /* use generic description */ }
     }
 
     const prompt = 'Professional commercial product photography: ' + productDesc + objText + ', placed in ' + theme + ', ' + mood + ' lighting, ' + style + ', ultra detailed, 8K, photorealistic, product in sharp focus, no text overlays, award winning photography';
 
-    /* Tier 1: HF FLUX.1-schnell — correct URL */
+    console.log('[' + (index+1) + '] Generating: ' + prompt.slice(0, 100) + '...');
+
+    /* Tier 1: fal-ai FLUX.1-schnell via HF router — correct URL */
     if (process.env.HF_TOKEN) {
-      const hfResult = await tryHF(prompt, index);
-      if (hfResult) return res.json(hfResult);
+      const result = await tryFalAI(prompt, index);
+      if (result) return res.json(result);
     }
 
-    /* Tier 2: Pollinations with retry on 429 */
-    const pollResult = await tryPollinations(prompt, index);
-    if (pollResult) return res.json(pollResult);
+    /* Tier 2: Pollinations.ai */
+    const result = await tryPollinations(prompt, index);
+    if (result) return res.json(result);
 
-    res.status(500).json({ error: 'Generation failed. Please try again in a few seconds.' });
+    res.status(500).json({ error: 'Generation failed. Please try again.' });
   } catch (err) {
     console.error('Edit image error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ── HF FLUX.1-schnell — correct router URL ── */
-async function tryHF(prompt, index) {
-  /* Two URL formats to try — HF keeps changing these */
-  const urls = [
-    'https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell/v1/text-to-image',
-    'https://router.huggingface.co/nebius/v1/images/generations'
-  ];
+/* ── fal-ai FLUX.1-schnell via HF router (correct URL) ── */
+async function tryFalAI(prompt, index) {
+  /* Correct URL format for fal-ai via HF router */
+  const url = 'https://router.huggingface.co/fal-ai/fal-ai/flux/schnell';
+  try {
+    console.log('[' + (index+1) + '] Trying fal-ai FLUX via HF router...');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + process.env.HF_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt,
+        image_size:          { width: 1024, height: 1024 },
+        num_inference_steps: 4,
+        num_images:          1,
+        enable_safety_checker: false
+      })
+    });
 
-  for (const url of urls) {
-    try {
-      console.log('[' + (index+1) + '] Trying HF: ' + url.split('/').slice(-3).join('/'));
-
-      /* Different body format for each endpoint */
-      const isNebius = url.includes('nebius');
-      const body = isNebius
-        ? JSON.stringify({ model: 'black-forest-labs/FLUX.1-schnell', prompt, width: 1024, height: 1024, num_inference_steps: 4, response_format: 'b64_json' })
-        : JSON.stringify({ inputs: prompt, parameters: { width: 1024, height: 1024 } });
-
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + process.env.HF_TOKEN, 'Content-Type': 'application/json' },
-        body
-      });
-
-      if (!r.ok) {
-        const e = await r.text();
-        console.error('[' + (index+1) + '] HF ' + r.status + ' at ' + url.split('/').slice(-2).join('/') + ':', e.slice(0, 200));
-        continue;
-      }
-
-      /* Nebius returns JSON with b64, HF returns raw image bytes */
-      if (isNebius) {
-        const data = await r.json();
-        const b64 = data?.data?.[0]?.b64_json;
-        if (!b64) { console.error('[' + (index+1) + '] Nebius: no b64 in response'); continue; }
-        return { url: 'data:image/jpeg;base64,' + b64, b64, index, source: 'hf-nebius' };
-      } else {
-        const buf = await r.buffer();
-        if (buf[0] === 123) { console.error('[' + (index+1) + '] HF returned JSON error:', buf.toString().slice(0, 150)); continue; }
-        const b64 = buf.toString('base64');
-        return { url: 'data:image/jpeg;base64,' + b64, b64, index, source: 'hf-flux' };
-      }
-    } catch (err) {
-      console.error('[' + (index+1) + '] HF error:', err.message);
+    if (!r.ok) {
+      const e = await r.text();
+      console.error('[' + (index+1) + '] fal-ai ' + r.status + ':', e.slice(0, 300));
+      /* Try alternative fal-ai URL format */
+      return await tryFalAIAlt(prompt, index);
     }
+
+    const data = await r.json();
+    /* fal-ai returns { images: [{ url, content_type }] } */
+    const imgUrl = data?.images?.[0]?.url;
+    if (!imgUrl) {
+      console.error('[' + (index+1) + '] fal-ai: no image URL:', JSON.stringify(data).slice(0, 200));
+      return await tryFalAIAlt(prompt, index);
+    }
+
+    /* Fetch the image from the returned URL */
+    const imgR = await fetch(imgUrl);
+    if (!imgR.ok) return null;
+    const buf = await imgR.buffer();
+    const b64 = buf.toString('base64');
+    return { url: 'data:image/jpeg;base64,' + b64, b64, index, source: 'fal-flux-schnell' };
+
+  } catch (err) {
+    console.error('[' + (index+1) + '] fal-ai error:', err.message);
+    return await tryFalAIAlt(prompt, index);
   }
-  console.log('[' + (index+1) + '] All HF endpoints failed, using Pollinations...');
-  return null;
 }
 
-/* ── Pollinations.ai — free, handles 429 with retry ── */
-async function tryPollinations(prompt, index) {
-  const maxRetries = 3;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      /* Stagger requests to avoid 429 — wait longer for later images */
-      const delay = index * 2000 + attempt * 5000;
-      if (delay > 0) {
-        console.log('[' + (index+1) + '] Waiting ' + (delay/1000) + 's before Pollinations...');
-        await sleep(delay);
-      }
+/* ── Alternative fal-ai URL format ── */
+async function tryFalAIAlt(prompt, index) {
+  const url = 'https://router.huggingface.co/fal-ai/fal-ai/flux/dev';
+  try {
+    console.log('[' + (index+1) + '] Trying fal-ai FLUX.dev alt...');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + process.env.HF_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt,
+        image_size:          { width: 1024, height: 1024 },
+        num_inference_steps: 28,
+        guidance_scale:      3.5,
+        num_images:          1,
+        enable_safety_checker: false
+      })
+    });
 
-      const seed    = Date.now() + index * 1337 + attempt * 777;
+    if (!r.ok) {
+      const e = await r.text();
+      console.error('[' + (index+1) + '] fal-ai dev ' + r.status + ':', e.slice(0, 300));
+      return null;
+    }
+
+    const data   = await r.json();
+    const imgUrl = data?.images?.[0]?.url;
+    if (!imgUrl) return null;
+
+    const imgR = await fetch(imgUrl);
+    if (!imgR.ok) return null;
+    const buf = await imgR.buffer();
+    const b64 = buf.toString('base64');
+    return { url: 'data:image/jpeg;base64,' + b64, b64, index, source: 'fal-flux-dev' };
+  } catch (err) {
+    console.error('[' + (index+1) + '] fal-ai dev error:', err.message);
+    return null;
+  }
+}
+
+/* ── Pollinations.ai — free, with retry on 429 ── */
+async function tryPollinations(prompt, index) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      /* Stagger requests: image 1 = 0s wait, image 2 = 3s, image 3 = 6s etc */
+      const stagger = index * 3000 + attempt * 8000;
+      if (stagger > 0) { console.log('[' + (index+1) + '] Waiting ' + (stagger/1000) + 's...'); await sleep(stagger); }
+
+      const seed    = Date.now() + index * 1337 + attempt * 999;
       const encoded = encodeURIComponent(prompt);
       const url     = 'https://image.pollinations.ai/prompt/' + encoded + '?width=1024&height=1024&seed=' + seed + '&nologo=true&model=flux';
 
       console.log('[' + (index+1) + '] Pollinations attempt ' + (attempt+1) + '...');
       const r = await fetch(url, { headers: { 'User-Agent': 'InstagramAI/1.0' } });
 
-      if (r.status === 429) {
-        console.log('[' + (index+1) + '] Pollinations 429, retrying after 10s...');
-        await sleep(10000);
-        continue;
-      }
-
-      if (!r.ok) { console.error('[' + (index+1) + '] Pollinations error:', r.status); return null; }
+      if (r.status === 429) { console.log('[' + (index+1) + '] 429, waiting 15s...'); await sleep(15000); continue; }
+      if (!r.ok) { console.error('[' + (index+1) + '] Pollinations:', r.status); return null; }
 
       const ct  = r.headers.get('content-type') || 'image/jpeg';
       const buf = await r.buffer();
-
-      /* Make sure we got an image not an error page */
-      if (buf[0] === 60 || buf[0] === 123) { /* '<' HTML or '{' JSON */
-        console.error('[' + (index+1) + '] Pollinations returned non-image response');
-        await sleep(5000);
-        continue;
-      }
+      if (buf[0] === 60 || buf[0] === 123) { await sleep(5000); continue; }
 
       const b64 = buf.toString('base64');
       return { url: 'data:' + ct + ';base64,' + b64, b64, index, source: 'pollinations' };
-
     } catch (err) {
       console.error('[' + (index+1) + '] Pollinations error:', err.message);
-      if (attempt < maxRetries - 1) await sleep(5000);
+      if (attempt < 2) await sleep(5000);
     }
   }
   return null;
@@ -252,7 +276,7 @@ app.post('/download-all', async (req, res) => {
         else if (img.url?.startsWith('data:')) buf = Buffer.from(img.url.split(',')[1], 'base64');
         else if (img.url)                      { const r = await fetch(img.url); if (r.ok) buf = await r.buffer(); }
         if (buf) folder.file('probiotic-fizzy-hd-' + img.index + '.png', buf);
-      } catch (e) { console.error('ZIP item error:', e.message); }
+      } catch (e) { console.error('ZIP error:', e.message); }
     }));
     const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     res.json({ zip: zipBuf.toString('base64') });
