@@ -261,11 +261,14 @@ function makeKlingToken() {
   const sk = process.env.KLING_SECRET_KEY;
   if (!ak || !sk) return null;
   const now = Math.floor(Date.now() / 1000);
-  return jwt.sign(
-    { iss: ak, iat: now - 5, exp: now + 1800 },
-    sk,
-    { algorithm: 'HS256', header: { alg: 'HS256', typ: 'JWT' } }
-  );
+  /* Kling requires iss, iat, exp AND nbf — all must be integers */
+  const payload = {
+    iss: ak,
+    iat: now,
+    exp: now + 1800,
+    nbf: now - 5   /* valid from 5 seconds ago to handle clock skew */
+  };
+  return jwt.sign(payload, sk, { algorithm: 'HS256' });
 }
 
 /* ══════════════════════════════════════════
