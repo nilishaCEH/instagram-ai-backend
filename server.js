@@ -74,36 +74,42 @@ app.post('/remove-bg', async (req, res) => {
 ══════════════════════════════════════════ */
 app.post('/edit-image', async (req, res) => {
   try {
-    const { image, theme, objects, mood, style, index = 0 } = req.body;
-    const objText = objects ? ', ' + objects + ' nearby' : '';
+    const { image, theme, objects, mood, style, index = 0, prompt_override, bg_only } = req.body;
 
-    /* Use Claude to describe product so FLUX can recreate it */
-    let productDesc = 'a probiotic fizzy beverage bottle with colorful label';
-    if (image && process.env.ANTHROPIC_API_KEY) {
-      try {
-        const dr = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 100,
-            messages: [{ role: 'user', content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } },
-              { type: 'text', text: 'Describe this beverage product in one sentence for a photography prompt. Include bottle/can shape, label colors, branding. Be specific. No intro text.' }
-            ]}]
-          })
-        });
-        if (dr.ok) {
-          const dd = await dr.json();
-          const desc = dd.content[0]?.text?.trim();
-          if (desc) productDesc = desc;
-        }
-      } catch (e) { /* use generic description */ }
+    let prompt;
+
+    if (prompt_override) {
+      /* Canvas compositing mode — frontend sends background-only prompt */
+      prompt = prompt_override;
+      console.log('[' + (index+1) + '] BG-only prompt: ' + prompt.slice(0, 100) + '...');
+    } else {
+      /* Legacy mode — describe product and generate full scene */
+      const objText = objects ? ', ' + objects + ' nearby' : '';
+      let productDesc = 'a probiotic fizzy beverage bottle with colorful label';
+      if (image && process.env.ANTHROPIC_API_KEY) {
+        try {
+          const dr = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 100,
+              messages: [{ role: 'user', content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } },
+                { type: 'text', text: 'Describe this beverage product in one sentence for a photography prompt. Include bottle/can shape, label colors, branding. Be specific. No intro text.' }
+              ]}]
+            })
+          });
+          if (dr.ok) {
+            const dd = await dr.json();
+            const desc = dd.content[0]?.text?.trim();
+            if (desc) productDesc = desc;
+          }
+        } catch (e) { /* use generic description */ }
+      }
+      prompt = 'Professional commercial product photography: ' + productDesc + objText + ', placed in ' + theme + ', ' + mood + ' lighting, ' + style + ', ultra detailed, 8K, photorealistic, product in sharp focus, no text overlays, award winning photography';
+      console.log('[' + (index+1) + '] Full prompt: ' + prompt.slice(0, 100) + '...');
     }
-
-    const prompt = 'Professional commercial product photography: ' + productDesc + objText + ', placed in ' + theme + ', ' + mood + ' lighting, ' + style + ', ultra detailed, 8K, photorealistic, product in sharp focus, no text overlays, award winning photography';
-
-    console.log('[' + (index+1) + '] Generating: ' + prompt.slice(0, 100) + '...');
 
     /* Tier 1: fal-ai FLUX.1-schnell via HF router — correct URL */
     if (process.env.HF_TOKEN) {
